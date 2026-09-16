@@ -16,14 +16,61 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: 确保兼容最低 iOS 13.0
+      - name: 补齐 iOS 原生工程骨架
         run: |
-          if [ -f "ios/Podfile" ]; then
-            sed -i '' "s/# platform :ios, '.*'/platform :ios, '13.0'/g" ios/Podfile
-          fi
+          flutter create --platforms=ios .
+          flutter pub get
 
-      - name: 拉取依赖
-        run: flutter pub get
+      - name: 注入相册权限与最低系统要求(iOS 13)
+        run: |
+          # 自动注入相册权限描述，防止装入手机后一打开相册就闪退
+          plutil -insert NSPhotoLibraryUsageDescription -string "需要访问相册以导入或保存图片" ios/Runner/Info.plist || true
+          plutil -insert NSPhotoLibraryAddUsageDescription -string "需要将生成的图片保存至相册" ios/Runner/Info.plist || true
+
+          # 写入标准 Podfile 并锁定 iOS 13.0，避免依赖库版本冲突
+          cat << 'EOF' > ios/Podfile
+          platform :ios, '13.0'
+          ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+          project 'Runner', {
+            'Debug' => :debug,
+            'Profile' => :release,
+            'Release' => :release,
+          }
+
+          def flutter_root
+            generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+            unless File.exist?(generated_xcode_build_settings_path)
+              raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+            end
+
+            File.foreach(generated_xcode_build_settings_path) do |line|
+              matches = line.match(/FLUTTER_ROOT\=(.*)/)
+              return matches[1].strip if matches
+            end
+            raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}."
+          end
+
+          require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+          flutter_ios_podfile_setup
+
+          target 'Runner' do
+            use_frameworks!
+            use_modular_headers!
+
+            flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+          end
+
+          post_install do |installer|
+            installer.pods_project.targets.each do |target|
+              flutter_additional_ios_build_settings(target)
+              target.build_configurations.each do |config|
+                config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0'
+              end
+            end
+          end
+          EOF
 
       - name: 编译无证书 Release 产物
         run: flutter build ios --release --no-codesign
