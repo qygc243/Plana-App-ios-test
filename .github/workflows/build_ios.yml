@@ -1,0 +1,41 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Flutter 环境
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: 确保兼容最低 iOS 13.0
+        run: |
+          if [ -f "ios/Podfile" ]; then
+            sed -i '' "s/# platform :ios, '.*'/platform :ios, '13.0'/g" ios/Podfile
+          fi
+
+      - name: 拉取依赖
+        run: flutter pub get
+
+      - name: 编译无证书 Release 产物
+        run: flutter build ios --release --no-codesign
+
+      - name: 封装为 IPA 文件
+        run: |
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -r -q Plana_iOS.ipa Payload
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Plana-iOS-Package
+          path: Plana_iOS.ipa
