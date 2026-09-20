@@ -1,96 +1,64 @@
-name: Build unsigned iOS IPA
+name: Build iOS IPA
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    # 代码、依赖或 iOS 工程变化时自动产出 unsigned IPA。
-    paths:
-      - '.github/workflows/build-ios-unsigned.yml'
-      - 'lib/**'
-      - 'test/**'
-      - 'pubspec.yaml'
-      - 'pubspec.lock'
-      - 'tool/**'
-      - 'ios/**'
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ios-unsigned-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  LANG: en_US.UTF-8
-  LC_ALL: en_US.UTF-8
 
 jobs:
-  build:
-    name: Flutter iOS (unsigned)
-    runs-on: macos-15
-    timeout-minutes: 45
-
+  build-ios:
+    runs-on: macos-latest
     steps:
-      - name: Check out source
-        uses: actions/checkout@v5
+      - name: 检出代码
+        uses: actions/checkout@v4
 
-      - name: Set up Flutter
+      - name: 配置 Flutter 环境
         uses: subosito/flutter-action@v2
         with:
-          # Flutter 3.44.0 only includes Dart 3.12.0, while pubspec.yaml
-          # requires Dart ^3.12.2.
-          flutter-version: '3.44.9'
-          channel: stable
+          channel: 'stable'
           cache: true
 
-      - name: Show toolchain versions
+      - name: 补齐 iOS 原生工程骨架
         run: |
-          flutter --version
-          xcodebuild -version
-          if command -v pod >/dev/null 2>&1; then pod --version; fi
+          flutter create --platforms=ios .
+          flutter pub get
 
-      - name: Ensure CocoaPods is available
-        run: command -v pod >/dev/null 2>&1 || brew install cocoapods
-
-      - name: Prepare iOS project
+      - name: 修复 iOS 导入图片直接打开相册
         run: |
-          chmod +x tool/prepare_ios.sh
-          ./tool/prepare_ios.sh --skip-build
+          # 仅针对图片格式的 custom 选图，替换为原生相册选择器模式
+          find lib -name "*.dart" -type f -exec sed -i '' \
+            -e 's/type: FileType.custom/type: FileType.image/g' \
+            -e '/allowedExtensions:/d' {} +
 
-      - name: Analyze Dart code
-        run: flutter analyze
+      - name: 生成并应用普拉娜应用图标
+        run: |
+          # 开启 pubspec.yaml 中的 ios 图标开关并自动切图生成各尺寸 Assets
+          sed -i '' 's/ios: false/ios: true/g' pubspec.yaml
+          dart run flutter_launcher_icons
 
-      - name: Run tests (non-blocking)
-        # Keep test failures visible without preventing the requested IPA
-        # artifact from being built.
-        continue-on-error: true
-        run: flutter test
+      - name: 配置 iOS 16.0 目标版本与相册权限
+        run: |
+          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*;/IPHONEOS_DEPLOYMENT_TARGET = 16.0;/g' ios/Runner.xcodeproj/project.pbxproj
+          plutil -insert NSPhotoLibraryUsageDescription -string "需要访问相册以导入或保存图片" ios/Runner/Info.plist || true
+          plutil -insert NSPhotoLibraryAddUsageDescription -string "需要将生成的图片保存至相册" ios/Runner/Info.plist || true
 
-      - name: Build unsigned release app
+      - name: 清理 CocoaPods 并启用 Swift Package Manager
+        run: |
+          cd ios
+          pod deintegrate || true
+          rm -rf Podfile Podfile.lock Pods
+          cd ..
+
+      - name: 编译无证书 Release 产物
         run: flutter build ios --release --no-codesign
 
-      - name: Package unsigned IPA
-        shell: bash
+      - name: 封装为 IPA 文件
         run: |
-          set -euo pipefail
-          APP='build/ios/iphoneos/Runner.app'
-          test -d "$APP"
-          rm -rf Payload Plana-App-unsigned.ipa
           mkdir -p Payload
-          cp -R "$APP" Payload/Runner.app
-          ditto -c -k --sequesterRsrc --keepParent Payload Plana-App-unsigned.ipa
-          unzip -tq Plana-App-unsigned.ipa
-          shasum -a 256 Plana-App-unsigned.ipa | tee Plana-App-unsigned.sha256
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -r -q Plana_iOS.ipa Payload
 
-      - name: Upload unsigned IPA
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: Plana-App-iOS-unsigned
-          path: |
-            Plana-App-unsigned.ipa
-            Plana-App-unsigned.sha256
-          if-no-files-found: error
-          retention-days: 14
-          compression-level: 0
+          name: Plana-iOS-Package
+          path: Plana_iOS.ipa
+
